@@ -39,6 +39,7 @@ MultiFormatReader::MultiFormatReader(const DecodeHints& hints) : _hints(hints)
 	if (formats.testFlag(BarcodeFormat::MaxiCode))
 		_readers.emplace_back(new MaxiCode::Reader(hints));
 
+
 	// At end in "try harder" mode
 	if (formats.testFlags(BarcodeFormat::LinearCodes) && hints.tryHarder())
 		_readers.emplace_back(new OneD::Reader(hints));

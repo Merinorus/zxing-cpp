@@ -43,7 +43,7 @@ static BarcodeFormatName NAMES[] = {
 	{BarcodeFormat::UPCE, "UPC-E"},
 	{BarcodeFormat::LinearCodes, "Linear-Codes"},
 	{BarcodeFormat::MatrixCodes, "Matrix-Codes"},
-};
+	{BarcodeFormat::DXFilmEdge, "DXFilmEdge"}};
 
 std::string ToString(BarcodeFormat format)
 {

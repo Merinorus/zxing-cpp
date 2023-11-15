@@ -151,6 +151,21 @@ void drawRect(const ImageView& image, const Position& pos, bool error)
 
 int main(int argc, char* argv[])
 {
+	//std::cout << argc << std::endl;
+	//std::cout << argv[1] << std::endl;
+	//std::cout << argv[2] << std::endl;
+	//std::cout << argv[3] << std::endl;
+	// Force override arguments for tests
+	if (argc <= 1)
+	{
+		std::cout << "No provided arguments. Parameters will be overriden for tests." << std::endl;
+		argc = 4;
+		argv[1] = "-format";
+		argv[2] = "DXFilmEdge";
+		argv[3] = "C:\\Users\\merin\\Downloads\\test_dx_edge.png";
+	}
+
+
 	DecodeHints hints;
 	std::vector<std::string> filePaths;
 	Results allResults;

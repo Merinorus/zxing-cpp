@@ -39,8 +39,9 @@ enum class BarcodeFormat
 	UPCA            = (1 << 14), ///< UPC-A
 	UPCE            = (1 << 15), ///< UPC-E
 	MicroQRCode     = (1 << 16), ///< Micro QR Code
+	DXFilmEdge      = (1 << 17), ///< DX Film Edge Barcodes
 
-	LinearCodes = Codabar | Code39 | Code93 | Code128 | EAN8 | EAN13 | ITF | DataBar | DataBarExpanded | UPCA | UPCE,
+	LinearCodes = Codabar | Code39 | Code93 | Code128 | EAN8 | EAN13 | ITF | DataBar | DataBarExpanded | DXFilmEdge | UPCA | UPCE,
 	MatrixCodes = Aztec | DataMatrix | MaxiCode | PDF417 | QRCode | MicroQRCode,
 	Any         = LinearCodes | MatrixCodes,
 
