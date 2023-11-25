@@ -21,7 +21,8 @@ namespace ZXing::OneD {
 //static const char ALPHABET[] = "01";
 //static const int CHARACTER_ENCODINGS[] = {0b0, 0b1};
 
-
+constexpr auto CLOCK_PATTERN_HF = FixedPattern<25, 31>   {5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
+constexpr auto CLOCK_PATTERN_NO_HF = FixedPattern<17, 23>{5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
 constexpr auto START_PATTERN_ = FixedPattern<5, 5>{1, 1, 1, 1, 1};
 constexpr auto STOP_PATTERN_ = FixedPattern<3, 3>{1, 1, 1};
 //constexpr auto START_PATTERN_ = FixedPattern<5, 10>{2, 2, 2, 2, 2};
@@ -47,19 +48,84 @@ int fromVector(std::vector<bool>::iterator begin, std::vector<bool>::iterator en
 	return retval;
 }
 
-Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::unique_ptr<DecodingState>&) const
+struct DXFEState : public RowReader::DecodingState
 {
+	bool foundClock = false;
+	bool containsHFNumber = false;
+	int clockPixelsInFront = 0;
+	int pixelTolerance = 0;
+};
+
+Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::unique_ptr<DecodingState>& state) const
+{
+	if (!state)
+		state.reset(new DXFEState);
+	auto& foundClock = static_cast<DXFEState*>(state.get())->foundClock;
+	auto& clockPixelsInFront = static_cast<DXFEState*>(state.get())->clockPixelsInFront;
+	auto& pixelTolerance = static_cast<DXFEState*>(state.get())->pixelTolerance;
+	auto& containsHFNumber = static_cast<DXFEState*>(state.get())->containsHFNumber;
+
+	//std::cout << "Decoding row " << rowNumber
+			  //<< " from " << next.pixelsInFront() << " to " << next.pixelsTillEnd() << std::endl;
+			  // 
+	//std::cout << "row number: " << rowNumber << std::endl;
 	//const int minCharCount = 15; // 23 with half-frame number, 15 without
 	const int minCharCount = 5;
-	const int minQuietZone = 0.2; // Even 1, but it might mess up detection
+	const float minQuietZone = 0.4; // Even 1, but it might mess up detection
 	//std::cout << "DXFilmEdge::decodePattern()";
+	if (!foundClock) {
+		auto clock = FindLeftGuard(next, minCharCount, CLOCK_PATTERN_HF, minQuietZone);
+		if (clock.isValid())
+			containsHFNumber = true;
+		if (!clock.isValid())
+			clock = FindLeftGuard(next, minCharCount, CLOCK_PATTERN_NO_HF, minQuietZone);
+		if (clock.isValid()) {
+			foundClock = true;
+			clockPixelsInFront = clock.pixelsInFront();
+			pixelTolerance = (clock.pixelsTillEnd() - clock.pixelsInFront()) / 23;
+			std::cout << "Found clock from " << clock.pixelsInFront() << " to " << clock.pixelsTillEnd() << std::endl;
+			std::cout << "Tolerance set to: " << pixelTolerance << " pixels" << std::endl;
+		}
+	}
+	
+	//<< "Clock length: " << clock.pixelsTillEnd() - clock.pixelsInFront() << " pixels" << std::endl;
+	// Since we parse the image from the center to the edges (top & bottom)
+	// The clock should be found before the data
+	// So we always make sure we have found the clock before parsing the data
+	if (!foundClock)
+		return {};
+
+
 	next = FindLeftGuard(next, minCharCount, START_PATTERN_, minQuietZone);
 	if (!next.isValid())
 		return {};
 
 	int xStart = next.pixelsInFront();
 
-	//std::cout << "Found a valid start pattern." << std::endl;
+
+
+	if (xStart - (pixelTolerance/2) < clockPixelsInFront && xStart + (pixelTolerance/2) > clockPixelsInFront) {
+		std::cout << "Found a valid start pattern within tolerance at " << xStart << std::endl;
+		std::cout << "Tolerance: +-" << pixelTolerance/2 << "pixels" << std::endl;
+	} else {
+		//std::cout << "Found a signal start pattern, but it's too far from the clock" << std::endl;
+		return {};
+	}
+
+
+	// Debug raw data
+	auto checkpoint = next;
+	std::cout << "Raw data: ";
+	while (next.isValid()) {
+		//std::cout << *next.data() / 8;
+		std::cout << *next.data() << ".";
+		next.shift(1);
+	}
+	std::cout << std::endl;
+	next = checkpoint;
+
+	// ?
+	//next = next.subView(0, containsHFNumber ? 25 : 17);
 
 	// Skip the start pattern (black white black white black
 	// The first signal bar is always white
@@ -68,7 +134,14 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 
 	//next = next.subView(5);
 
-	next.shift(5);
+
+	//  Compute the length of a bar
+	// It may be greater than 1 depending on what have been found in the raw signal
+	auto per_bar_raw_width = *next.data();
+	std::cout << "Width per bar: " << per_bar_raw_width << std::endl;
+
+	auto START_PATTERN_SIZE = 5;
+	next.shift(START_PATTERN_SIZE);
 
 	//// Detect old type of DX Edge Code (without half-frame number)
 	//if (IsRightGuard(next.subView(24), STOP_PATTERN_, minQuietZone)) {
@@ -82,66 +155,151 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 
 	auto signal_begin = next;
 	int signal_length = 0;
-	while (next.isValid()) {
-		signal_length += *next.data() / 8;
-		next.shift(1);
-	}
-
-	// Check the stop pattern exists and is about to be reached
-	next = next.subView(0, 3);
-	if (!IsRightGuard(next, STOP_PATTERN_, minQuietZone)) {
-		return {};
-	}
-		
-
-
-	//std::cout << "Signal length: " << signal_length << std::endl;
-	bool signal_with_half_frame_number = true;
-	if (signal_length == 23) {
-		//std::cout << "DX Edge code with half-frame number" << std::endl;
-	} else if (signal_length == 15) {
-		//std::cout << "DX Edge code without half-frame number" << std::endl;
-		signal_with_half_frame_number = false;
-		//return {};
-	} else {
-		//std::cout << "Unknown type of DX Edge" << std::endl;
-		return {};
-	}
-	next = signal_begin;
-
-	std::vector<bool> signal_data;
-	signal_data.reserve(signal_length);
-	//auto signal_data_it = signal_data.begin();
-
-	//std::cout << "BEGIN DECODING" << std::endl;
+	//std::cout << "isRightGuard? " << IsRightGuard(next.subView(0, 3), STOP_PATTERN_, minQuietZone) << std::endl;
+	//for (auto i = 0; i < containsHFNumber ? 25 : 17; ++i) {
+	//	if (!next.isValid())
+	//		return {};
+	//	signal_length += *next.data() / 8;
+	//	next.shift(1);
+	//}
 
 	if (!next.isValid())
 		return {};
 
-	 //Blank Separator
-	//auto current_bar_width = *next.data() / 8;
 
-	// Signal starts with a white bar (we include the separator just after the start pattern)
+
+	std::vector<bool> signal_data;
+	signal_data.reserve(signal_length);
 	bool current_signal_is_black = false;
 
-	while (next.isValid()) {
-		//std::cout << "sum(): " << next.sum() << std::endl;
-		//std::cout << "end(): " << next.end() << std::endl;
-		//std::cout << "pixelsInFront(): " << next.pixelsInFront() << std::endl;
-		//std::cout << "pixelsTillEnd(): " << next.pixelsTillEnd() << std::endl;
-		auto current_bar_width = *next.data() / 8;
-		while (current_bar_width > 0) {
-			if (current_signal_is_black) {
-				signal_data.push_back(true);
-			} else {
-				signal_data.push_back(false);
-			}
+	while (signal_length < (containsHFNumber ? 23 : 15)) {
+		std::cout << "current signal length: " << signal_length << std::endl;
+		if (!next.isValid())
+			return {};
+		//auto current_bar_width = *next.data() / 8;
+
+		auto current_bar_width =
+			*next.data() / per_bar_raw_width + (*next.data() % per_bar_raw_width > (per_bar_raw_width / 2) ? 1 : 0);
+
+		//auto current_bar_width = *next.data() / per_bar_raw_width;
+		std::cout << "current_bar_width: " << current_bar_width << std::endl;
+		if (current_bar_width == 0) {
+			std::cout << "Can't conclude on black or white bar. Aborting." << std::endl;
+			return {};
+		}
+		signal_length += current_bar_width;
+		//std::cout << "Current symbol size: " << next.size() << std::endl;
+		while (current_bar_width > 0 && signal_data.size() < (containsHFNumber ? 23 : 15)) {
+			signal_data.push_back(current_signal_is_black);
 			--current_bar_width;
 		}
-		//std::cout << "data: " << current_bar_width << std::endl;
-		next.shift(1);
 		current_signal_is_black = !current_signal_is_black;
+		next.shift(1);
 	}
+	//current_bar_width = *next.data() / 8;
+	//while (current_bar_width > 0) {
+	//	if (current_signal_is_black) {
+	//		signal_data.push_back(true);
+	//		std::cout << "1";
+	//	} else {
+	//		signal_data.push_back(false);
+	//		std::cout << "0";
+	//	}
+	//	--current_bar_width;
+	//}
+	// std::cout << "data: " << current_bar_width << std::endl;
+	//next.shift(1);
+
+
+
+	std::cout << "final signal length: " << signal_length << std::endl;
+
+
+
+
+
+	//if (signal_length == 0)
+	//	return {};
+	//while (next.isValid()) {
+
+	//}
+	//std::cout << "1" << std::endl;
+	// Check the stop pattern exists and is about to be reached
+	// Check if the data ends with stop signal
+
+	next = next.subView(0, 3);
+	if (!IsRightGuard(next, STOP_PATTERN_, minQuietZone)) {
+		std::cout << "STOP pattern not found!" << std::endl;
+		return {};
+	}
+	std::cout << "Found stop pattern. Signal length: " << signal_length << std::endl;
+
+
+	////std::cout << "Signal length: " << signal_length << std::endl;
+	//bool signal_with_half_frame_number = true;
+	//if (signal_length == 23) {
+	//	//std::cout << "DX Edge code with half-frame number" << std::endl;
+	//} else if (signal_length == 15) {
+	//	//std::cout << "DX Edge code without half-frame number" << std::endl;
+	//	signal_with_half_frame_number = false;
+	//	//return {};
+	//} else {
+	//	return {};
+	//}
+	bool signal_with_half_frame_number = containsHFNumber;
+
+
+	//next = signal_begin;
+
+	//std::vector<bool> signal_data;
+	//signal_data.reserve(signal_length);
+	////auto signal_data_it = signal_data.begin();
+
+	////std::cout << "BEGIN DECODING" << std::endl;
+
+	//if (!next.isValid())
+	//	return {};
+	// //Blank Separator
+	////auto current_bar_width = *next.data() / 8;
+
+	//// Signal starts with a white bar (we include the separator just after the start pattern)
+	//bool current_signal_is_black = false;
+	//std::cout << "Vector content: ";
+	//for (auto i = 0, current_bar_width=0; next.isValid() && i <= (containsHFNumber ? 25 - START_PATTERN_SIZE : 17 - START_PATTERN_SIZE); i += current_bar_width)
+	////while (next.isValid())
+	//{
+	//	//std::cout << "sum(): " << next.sum() << std::endl;
+	//	//std::cout << "end(): " << next.end() << std::endl;
+	//	//std::cout << "pixelsInFront(): " << next.pixelsInFront() << std::endl;
+	//	//std::cout << "pixelsTillEnd(): " << next.pixelsTillEnd() << std::endl;
+	//	current_bar_width = *next.data() / 8;
+	//	while (current_bar_width > 0) {
+	//		if (current_signal_is_black) {
+	//			signal_data.push_back(true);
+	//			std::cout << "1";
+	//		} else {
+	//			signal_data.push_back(false);
+	//			std::cout << "0";
+	//		}
+	//		--current_bar_width;
+	//	}
+	//	//std::cout << "data: " << current_bar_width << std::endl;
+	//	next.shift(1);
+	//	current_signal_is_black = !current_signal_is_black;
+	//}
+	std::cout << std::endl;
+	std::cout << "Vector size: " << signal_data.size() << std::endl;
+	std::cout << "Vector content: ";
+	for (bool flag : signal_data) {
+		std::cout << (int)flag;
+	}
+	std::cout << std::endl;
+	if (signal_with_half_frame_number && signal_data.size() < 23)
+		return {};
+
+	if (!signal_with_half_frame_number && signal_data.size() < 15)
+		return {};
+
 	if (signal_data.at(0) || signal_data.at(8))
 			return {};
 
@@ -313,6 +471,9 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 		// symbologyIdentifier.modifier = '1'; // Modulo 10 symbol check character validated and transmitted
 
 	int xStop = next.pixelsTillEnd();
+	next.shift(3);
+	std::cout << "Found signal from " << xStart << " to " << next.pixelsTillEnd() << std::endl;
+	//std::cout << "Found signal from " << xStart << " to " << xStop << std::endl;
 	return Result(txt, rowNumber, xStart, xStop, BarcodeFormat::DXFilmEdge, symbologyIdentifier, error);
 }
 
