@@ -162,7 +162,7 @@ int main(int argc, char* argv[])
 		argc = 4;
 		argv[1] = "-format";
 		argv[2] = "DXFilmEdge";
-		argv[3] = "C:\\Users\\merin\\Downloads\\PXL_20231120_212444715 (2).jpg";
+		argv[3] = "C:\\Users\\merin\\Downloads\\film_code.jpg";
 	}
 
 
