@@ -203,7 +203,7 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 	// Check the parity bit
 	auto signal_sum = std::accumulate(signal_data.begin(), signal_data.end()-2, 0);
 	auto parity_bit = *(signal_data.end() - 2);
-	if (signal_sum % 2 != parity_bit)
+	if (signal_sum % 2 != (int)parity_bit)
 		return {};
 
 	// Compute the DX 1 number (product number)

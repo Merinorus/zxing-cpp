@@ -45,7 +45,7 @@ enum class BarcodeFormat
 	MatrixCodes = Aztec | DataMatrix | MaxiCode | PDF417 | QRCode | MicroQRCode,
 	Any         = LinearCodes | MatrixCodes,
 
-	_max = MicroQRCode, ///> implementation detail, don't use
+	_max = DXFilmEdge, ///> implementation detail, don't use
 };
 
 ZX_DECLARE_FLAGS(BarcodeFormats, BarcodeFormat)
