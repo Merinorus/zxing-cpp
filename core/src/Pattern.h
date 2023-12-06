@@ -17,7 +17,6 @@
 #include <limits>
 #include <numeric>
 #include <vector>
-#include <iostream>
 
 namespace ZXing {
 
@@ -279,9 +278,6 @@ PatternView FindLeftGuard(const PatternView& view, int minSize, const FixedPatte
 {
 	return FindLeftGuard<LEN>(view, std::max(minSize, LEN),
 							  [&pattern, minQuietZone](const PatternView& window, int spaceInPixel) {
-		if (!IsPattern(window, pattern, spaceInPixel, minQuietZone)) {
-			//std::cout << "pattern not found" << std::endl;
-		}
 								  return IsPattern(window, pattern, spaceInPixel, minQuietZone);
 							  });
 }

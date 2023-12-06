@@ -12,7 +12,7 @@
 #include "ZXAlgorithms.h"
 
 #include <array>
-#include <iostream>
+
 namespace ZXing::OneD {
 
 constexpr auto START_PATTERN_ = FixedPattern<4, 4>{1, 1, 1, 1};
@@ -23,6 +23,7 @@ Result ITFReader::decodePattern(int rowNumber, PatternView& next, std::unique_pt
 {
 	const int minCharCount = 6;
 	const int minQuietZone = 10;
+
 	next = FindLeftGuard(next, 4 + minCharCount/2 + 3, START_PATTERN_, minQuietZone);
 	if (!next.isValid())
 		return {};
