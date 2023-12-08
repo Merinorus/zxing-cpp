@@ -1,5 +1,4 @@
 /*
- * Copyright 2023 ZXing authors
  * Copyright 2023 Antoine Mérino
  */
 // SPDX-License-Identifier: Apache-2.0

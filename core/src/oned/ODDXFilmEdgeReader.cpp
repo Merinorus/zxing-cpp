@@ -1,5 +1,4 @@
 /*
- * Copyright 2023 ZXing authors
  * Copyright 2023 Antoine Mérino
  */
 // SPDX-License-Identifier: Apache-2.0
@@ -14,18 +13,27 @@
 #include <iostream>
 #include <bitset>
 #include <iomanip>
-#include<numeric>
+#include <numeric>
+#include <set>
 namespace ZXing::OneD {
 
 // Detection is made from center to bottom.
 // We ensure the clock signal is decoded before the data signal to avoid false positives.
 // They are two version of a DX Edge codes : without half-frame information and with half-frame information.
 // The clock signal is longer if the DX code contains the half-frame information (more recent version)
+const int CLOCK_PATTERN_LENGTH_HF = 31;
+const int CLOCK_PATTERN_LENGTH_NO_HF = 23;
 const int DATA_START_PATTERN_SIZE = 5;
-constexpr auto CLOCK_PATTERN_HF = FixedPattern<25, 31>   {5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
-constexpr auto CLOCK_PATTERN_NO_HF = FixedPattern<17, 23>{5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
-constexpr auto DATA_START_PATTERN_ = FixedPattern<5, 5> {1, 1, 1, 1, 1};
-constexpr auto DATA_STOP_PATTERN_ = FixedPattern<3, 3> {1, 1, 1};
+constexpr auto CLOCK_PATTERN_COMMON = FixedPattern<15, 20> {5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+constexpr auto CLOCK_PATTERN_HF =
+	FixedPattern<25, CLOCK_PATTERN_LENGTH_HF>{5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
+constexpr auto CLOCK_PATTERN_NO_HF = FixedPattern<17, CLOCK_PATTERN_LENGTH_NO_HF>{5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3};
+constexpr auto DATA_START_PATTERN_ = FixedPattern<5, 5>    {1, 1, 1, 1, 1};
+constexpr auto DATA_STOP_PATTERN_ = FixedPattern<3, 3>     {1, 1, 1};
+
+// Signal data length, without the start and stop patterns
+const int DATA_LENGTH_HF = 23;
+const int DATA_LENGTH_NO_HF = 15;
 
 /**
  * @brief Parse a part of a vector of bits (boolean) to a decimal number.
@@ -44,6 +52,56 @@ int binaryToDecimal(std::vector<bool>::iterator begin, std::vector<bool>::iterat
 	return retval;
 }
 
+class Clock
+{
+public:
+	int rowNumber = 0;
+	bool containsHFNumber = false; // Clock signal (thus data signal) with half-frame number (longer version)
+	int xStart = 0; // Beginning of the clock signal on the X-axis, in pixels
+	int xStop = 0; // End of the clock signal on the X-axis, in pixels
+	int pixelTolerance = 0; // Pixel tolerance will be set depending of the length of the clock signal (in pixels)
+
+	bool operator<(const int x) const
+	{
+		return xStart < x;
+	}
+
+	bool operator < (const Clock& other) const {
+		return xStart < other.xStart;
+	}
+
+	// We assume two clock are the same when they start in about the same X position,
+	// even if they are different clocks (stop at different position or different type)
+	// Only the more recent clock is kept.
+	bool xStartInRange(const Clock& other) const {
+		auto tolerance = std::max(pixelTolerance, other.pixelTolerance);
+		return (xStart - tolerance) <= other.xStart && (xStart + tolerance) >= other.xStart;
+	}
+
+	bool xStartInRange(const int x) const
+	{ return (xStart - pixelTolerance) <= x && (xStart + pixelTolerance) >= x;
+	}
+
+	bool xStopInRange(const int x) const { return (xStop - pixelTolerance) <= x && (xStop + pixelTolerance) >= x; }
+
+};
+
+class ClockSet : public std::set<Clock, std::less<>>
+{
+public:
+
+	// Return the closest clock on the X axis
+	const ClockSet::iterator closest_element(const int x) {
+		const ClockSet::iterator it = lower_bound(x);
+		if (it == begin())
+			return it;
+
+		const ClockSet::iterator prev_it = std::prev(it);
+		return (it == end() || x - prev_it->xStart <= it->xStart - x) ? prev_it : it;
+	}
+};
+
+
 // To avoid many false positives,
 // the clock signal must be found to attempt to decode a data signal.
 // We ensure the data signal starts below a clock.
@@ -51,12 +109,74 @@ int binaryToDecimal(std::vector<bool>::iterator begin, std::vector<bool>::iterat
 // ie. the signal may start a few pixels before or after the clock on the X-axis.
 struct DXFEState : public RowReader::DecodingState
 {
-	bool foundClock = false;
-	bool containsHFNumber = false; // Clock signal (thus data signal) with half-frame number (longer version)
-	int clockXStart = 0; // Beginning of the clock signal on the X-axis, in pixels
-	int clockXStop = 0; // End of the clock signal on the X-axis, in pixels 
-	int pixelTolerance = 0; // Pixel tolerance will be set depending of the length of the clock signal (in pixels)
+	ClockSet allClocks;
 };
+
+template <typename Set>
+//Helper to find the closest element in a set 
+auto closest_element(Set& set, const typename Set::value_type& value) -> decltype(set.begin())
+{
+	const auto it = set.lower_bound(value);
+	if (it == set.begin())
+		return it;
+
+	const auto prev_it = std::prev(it);
+	return (it == set.end() || value - *prev_it <= *it - value) ? prev_it : it;
+}
+
+
+void findClock(int rowNumber, PatternView& next, ClockSet& allClocks)
+{
+	// Minimum "allowed "white" zone to the left and the right sides of the clock signal.
+	const float minClockNoHFQuietZone = 2;
+	const float minClockHFQuietZone = 1;
+
+	// Adjust the pixel shift tolerance between the data signal and the clock signal.
+	// 1 means the signal can be shifted up to one bar to the left or the right.
+	const float pixelToleranceRatio = 0.5;
+
+	// Before detecting any clock,
+	// try to detect the common pattern between all types of clocks.
+	// This avoid doing two detections at each interations instead of one,
+	// when they is no DX Edge code to detect.
+	auto common_clock_pattern =
+		FindLeftGuard(next, CLOCK_PATTERN_COMMON.size(), CLOCK_PATTERN_COMMON, std::min(minClockNoHFQuietZone, minClockHFQuietZone));
+	if (common_clock_pattern.isValid()) {
+		bool foundClock = false;
+		bool containsHFNumber = false;
+		auto clock_pattern = FindLeftGuard(next, CLOCK_PATTERN_HF.size(), CLOCK_PATTERN_HF, minClockHFQuietZone);
+		if (clock_pattern.isValid()) {
+			foundClock = true;
+			containsHFNumber = true;
+		} else {
+			clock_pattern = FindLeftGuard(next, CLOCK_PATTERN_NO_HF.size(), CLOCK_PATTERN_NO_HF, minClockNoHFQuietZone);
+			if (clock_pattern.isValid())
+				foundClock = true;
+		}
+		if (foundClock) {
+			Clock clock;
+			clock.rowNumber = rowNumber;
+			clock.containsHFNumber = containsHFNumber;
+			clock.xStart = clock_pattern.pixelsInFront();
+			clock.xStop = clock_pattern.pixelsTillEnd();
+			clock.pixelTolerance = (clock_pattern.pixelsTillEnd() - clock_pattern.pixelsInFront())
+								   / (containsHFNumber ? CLOCK_PATTERN_LENGTH_HF : CLOCK_PATTERN_LENGTH_NO_HF) * pixelToleranceRatio;
+			// Check if the clock was not already found
+			auto closestClock = allClocks.closest_element(clock.xStart);
+			if (closestClock != allClocks.end() && clock.xStartInRange(*closestClock)) {
+				// If the clock was already found, replace with the new coordinates
+				// This allow to find the signal data more precisely if the image is skewed
+				allClocks.erase(closestClock);
+				allClocks.insert(clock);
+			} else {
+				allClocks.insert(clock);
+			}
+		}
+	}
+
+
+
+}
 
 Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::unique_ptr<DecodingState>& state) const
 {
@@ -64,59 +184,40 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 	// We check also if it contains the half-frame number, since it affects the signal structure.
 	if (!state)
 		state.reset(new DXFEState);
-	auto& foundClock = static_cast<DXFEState*>(state.get())->foundClock;
-	auto& clockXStart = static_cast<DXFEState*>(state.get())->clockXStart;
-	auto& clockXStop = static_cast<DXFEState*>(state.get())->clockXStop;
-	auto& pixelTolerance = static_cast<DXFEState*>(state.get())->pixelTolerance;
-	auto& containsHFNumber = static_cast<DXFEState*>(state.get())->containsHFNumber;
+	auto& allClocks = static_cast<DXFEState*>(state.get())->allClocks;
 
-	// TODO: what is this measure exactly?
-	const int minCharCount = 5;
 
-	// Minimum "allowed "white" zone to the left and the right sides of the signal.
-	// The margin is low because of potential sprocket holes close to the signal.
-	const float minQuietZone = 0.4;
 
-	// Adjust the pixel shift tolerance between the data signal and the clock signal.
-	// 1 means the signal can be shifted up to one bar to the left or the right.
-	const float pixelToleranceRatio = 0.4;
+	// Minimum "allowed "white" zone to the left and the right sides of the data signal.
+	// We allow a smaller quiet zone, ie improve detection at risk of getting false positives,
+	// because the risk is greatly reduced when we check we found the clock before the signal.
+	const float minDataQuietZone = 0.5;
 
-	// Since we parse the image from the center to the edges (top & bottom)
-	// The clock should be found before the data
-	// So we always make sure we have found the clock before parsing the data signal.
-	if (!foundClock) {
-		auto clock = FindLeftGuard(next, minCharCount, CLOCK_PATTERN_HF, minQuietZone);
-		if (clock.isValid()) {
-			foundClock = true;
-			containsHFNumber = true;
-		} else {
-			clock = FindLeftGuard(next, minCharCount, CLOCK_PATTERN_NO_HF, minQuietZone);
-			if (clock.isValid())
-				foundClock = true;
-		}
-		if (foundClock) {
-			clockXStart = clock.pixelsInFront();
-			clockXStop = clock.pixelsTillEnd();
-			pixelTolerance = (clock.pixelsTillEnd() - clock.pixelsInFront()) / (containsHFNumber ? 31 : 23) * pixelToleranceRatio;
-		}
-	}
+	// TODO Separate in two separate functions? lack of separation of concerns
+	findClock(rowNumber, next, allClocks);
 
-	if (!foundClock)
-		// Clock not found. Aborting the decoding of the current row.
+	// We should find at least one clock before attempting to decode the data signal.
+	if (allClocks.empty())
 		return {};
 
 
-
-	// Now that we found the clock, attempt to decode the data signal.
+	// Now that we found at least a clock, attempt to decode the data signal.
 	// Start by finding the data start pattern.
-	next = FindLeftGuard(next, minCharCount, DATA_START_PATTERN_, minQuietZone);
+	next = FindLeftGuard(next, DATA_START_PATTERN_.size(), DATA_START_PATTERN_, minDataQuietZone);
 	if (!next.isValid())
 		return {};
 
 	int xStart = next.pixelsInFront();
 
 	// The found data signal must be below the clock signal, otherwise we abort the decoding (potential false positive)
-	if (!(xStart - pixelTolerance < clockXStart && xStart + pixelTolerance > clockXStart)) {
+	auto closestClock = allClocks.closest_element(xStart);
+	if (!closestClock->xStartInRange(xStart)) {
+		return {};
+	}
+
+	// Avoid decoding a signal found at the top of the clock
+	// (might happen when stacking two films one of top of the other)
+	if (closestClock->rowNumber > rowNumber) {
 		return {};
 	}
 
@@ -124,77 +225,82 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 	// It may be greater than 1 depending on what have been found in the raw signal
 	auto per_bar_raw_width = *next.data();
 
-	// Skip the data start pattern (black white black white black)
-	// The first signal bar is always white
-	// (separation between the start pattern and the product number) 
+	// Skip the data start pattern (black, white, black, white, black)
+	// The first signal bar is always white: this is the
+	// separation between the start pattern and the product number)
 	next.shift(DATA_START_PATTERN_SIZE);
-
-	//auto signal_begin = next;
-	int signal_length = 0;
 
 	if (!next.isValid())
 		return {};
 
 	std::vector<bool> signal_data;
+
 	// They are two possible data signal lengths (with or without half-frame information)
-	signal_data.reserve(containsHFNumber ? 23 : 15);
-	bool current_signal_is_black = false;
+	signal_data.reserve(closestClock->containsHFNumber ? DATA_LENGTH_HF : DATA_LENGTH_NO_HF);
 
 	// Populate a vector of booleans to represent the bits. true = black, false = white.
 	// We start the parsing just after the data start signal.
 	// The first bit is always a white bar (we include the separator just after the start pattern)
 	// Eg: {3, 1, 2} -> {0, 0, 0, 1, 0, 0}
-	while (signal_length < (containsHFNumber ? 23 : 15)) {
+	int signal_length = 0;
+	bool current_bar_is_black = false; // the current bar is white
+	while (signal_length < (closestClock->containsHFNumber ? DATA_LENGTH_HF : DATA_LENGTH_NO_HF)) {
 		if (!next.isValid())
 			return {};
 
+		// Zero means we can't conclude on black or white bar. Abort the decoding.
 		if (*next.data() == 0) {
-			// Zero means we can't conclude on black or white bar. Abort the decoding.
 			return {};
 		}
 
+		// Adjust the current bar according to the computed ratio above.
+		// When the raw result is not exact (between two bars),
+		// we round the bar size to the nearest integer.
 		auto current_bar_width =
 			*next.data() / per_bar_raw_width + (*next.data() % per_bar_raw_width >= (per_bar_raw_width / 2) ? 1 : 0);
 
 		signal_length += current_bar_width;
-		while (current_bar_width > 0 && signal_data.size() < (containsHFNumber ? 23 : 15)) {
-			signal_data.push_back(current_signal_is_black);
+
+		// Extend the bit array according to the current bar length.
+		// Eg: one white bars -> {0}, three black bars -> {1, 1, 1}
+		while (current_bar_width > 0
+			   && signal_data.size() < (closestClock->containsHFNumber ? DATA_LENGTH_HF : DATA_LENGTH_NO_HF)) {
+			signal_data.push_back(current_bar_is_black);
 			--current_bar_width;
 		}
-		current_signal_is_black = !current_signal_is_black;
+
+		// Iterate to the next data signal bar (the color is inverted)
+		current_bar_is_black = !current_bar_is_black;
 		next.shift(1);
 	}
 
+
 	// Check the signal length
-	if (signal_length != (containsHFNumber ? 23 : 15))
+	if (signal_length != (closestClock->containsHFNumber ? DATA_LENGTH_HF : DATA_LENGTH_NO_HF))
 		return {};
 	
 	// Check there is the Stop pattern at the end of the data signal
 	next = next.subView(0, 3);
-	if (!IsRightGuard(next, DATA_STOP_PATTERN_, minQuietZone)) {
+	if (!IsRightGuard(next, DATA_STOP_PATTERN_, minDataQuietZone)) {
 		return {};
 	}
-
 	// Check the data signal has been fully parsed
-	if (containsHFNumber && signal_data.size() < 23)
+	if (closestClock->containsHFNumber && signal_data.size() < DATA_LENGTH_HF)
 		return {};
-
-	if (!containsHFNumber && signal_data.size() < 15)
+	if (!closestClock->containsHFNumber && signal_data.size() < DATA_LENGTH_NO_HF)
 		return {};
 
 	// The following bits are always white (=false), they are separators.
 	if (signal_data.at(0) || signal_data.at(8))
 		return {};
-
-	if (containsHFNumber && (signal_data.at(20) || signal_data.at(22)))
+	if (closestClock->containsHFNumber && (signal_data.at(20) || signal_data.at(22)))
 		return {};
-
-	if (!containsHFNumber && (signal_data.at(8) || signal_data.at(14)))
+	if (!closestClock->containsHFNumber && (signal_data.at(8) || signal_data.at(14)))
 		return {};
 
 	// Check we didn't just parse the clock signal instead of the data signal.
 	// It might be parsed accidentally when the minQuietZone is too small.
-	if (minQuietZone <= 1 && containsHFNumber) {
+	if (minDataQuietZone <= 1 && closestClock->containsHFNumber) {
 		std::vector<bool> signal_clock = {0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0};
 		if (signal_clock == signal_data)
 			return {};
@@ -219,7 +325,7 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 	std::string txt;
 	txt.reserve(10);
 	txt = std::to_string(product_number) + "-" + std::to_string(generation_number);
-	if (containsHFNumber) {
+	if (closestClock->containsHFNumber) {
 		auto half_frame_number = binaryToDecimal(signal_data.begin() + 13, signal_data.begin() + 20);
 		txt += "/" + std::to_string(half_frame_number / 2);
 		if (half_frame_number % 2)
@@ -232,11 +338,22 @@ Result DXFilmEdgeReader::decodePattern(int rowNumber, PatternView& next, std::un
 	// AFAIK The DX Edge barcode doesn't follow any symbology identifier.
 	SymbologyIdentifier symbologyIdentifier = {'I', '0'}; // No check character validation ?
 
+
 	int xStop = next.pixelsTillEnd();
 
 	// The found data signal must be below the clock signal, otherwise we abort the decoding (potential false positive)
-	if (!(xStop - pixelTolerance < clockXStop && xStop + pixelTolerance > clockXStop)) {
+	if (!closestClock->xStopInRange(xStop)) {
 		return {};
+	}
+
+	// Update the clock X coordinates with the latest corresponding data signal
+	// This may improve signal detection for next row iterations
+	if (closestClock->xStop != xStop || closestClock->xStart != xStart) {
+		Clock clock(*closestClock);
+		clock.xStart = xStart;
+		clock.xStop = xStop;
+		allClocks.erase(closestClock);
+		allClocks.insert(clock);
 	}
 
 	return Result(txt, rowNumber, xStart, xStop, BarcodeFormat::DXFilmEdge, symbologyIdentifier, error);
