@@ -20,6 +20,8 @@ class DXFilmEdgeReader : public RowReader
 public:
 	using RowReader::RowReader;
 
+	bool supportsInversion() const override { return true; }
+
 	BarcodeData decodePattern(int rowNumber, PatternView& next, std::unique_ptr<DecodingState>&) const override;
 };
 

@@ -64,6 +64,8 @@ public:
 
 	virtual ~RowReader() = default;
 
+	virtual bool supportsInversion() const { return false; }
+
 	virtual BarcodeData decodePattern(int rowNumber, PatternView& next, std::unique_ptr<DecodingState>& state) const = 0;
 
 	/**

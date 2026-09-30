@@ -32,7 +32,7 @@
 
 namespace ZXing::OneD {
 
-Reader::Reader(const ReaderOptions& opts) : ZXing::Reader(opts)
+Reader::Reader(const ReaderOptions& opts) : ZXing::Reader(opts, opts.hasAnyFormat(BarcodeFormat::DXFilmEdge))
 {
 	using enum BarcodeFormat;
 
@@ -132,6 +132,19 @@ BarcodesData DoDecode(const std::vector<std::unique_ptr<RowReader>>& readers, co
 		if (!image.getPatternRow(rowNumber, rotate ? 90 : 0, bars))
 			continue;
 
+		if (image.inverted()) {
+			// Pattern rows are extracted from the original luminance buffer. Swap bars and spaces,
+			// preserving the convention that the first and last runs are white (possibly empty).
+			if (bars.front() == 0)
+				bars.erase(bars.begin());
+			else
+				bars.insert(bars.begin(), 0);
+			if (bars.back() == 0)
+				bars.pop_back();
+			else
+				bars.push_back(0);
+		}
+
 #ifdef PRINT_DEBUG
 		bool val = false;
 		int x = 0;
@@ -156,6 +169,8 @@ BarcodesData DoDecode(const std::vector<std::unique_ptr<RowReader>>& readers, co
 			}
 			// Look for a barcode
 			for (size_t r = 0; r < readers.size(); ++r) {
+				if (image.inverted() && !readers[r]->supportsInversion())
+					continue;
 				// If this is a pure symbol, then checking a single non-empty line is sufficient for all but the stacked
 				// DataBar codes. They are the only ones using the decodingState, which we can use as a flag here.
 				if (isPure && i && !decodingState[r])
